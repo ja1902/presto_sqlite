@@ -7,19 +7,13 @@ Read-only. Single schema (`default`). Built against Presto **0.296**.
 
 ## Requirements
 
-- Java 8+ (for building)
-- Maven 3.6+
-- A running Presto installation
+- Java 17+
+- Python 3
 
 ## Setup
 
-Clone the repo and run the install script. It handles everything:
-
-1. Builds the plugin from source
-2. Copies the JARs into Presto's plugin directory
-3. Creates the catalog properties file
-4. Sets up a Python virtual environment with `prestodb`
-5. Creates the demo SQLite database
+Clone the repo and run the install script. It walks you through everything
+interactively:
 
 **Linux / macOS:**
 
@@ -27,7 +21,7 @@ Clone the repo and run the install script. It handles everything:
 git clone https://github.com/ja1902/presto_sqlite.git
 cd presto_sqlite
 chmod +x install.sh
-./install.sh /opt/presto /absolute/path/to/your/database.db
+./install.sh
 ```
 
 **Windows (PowerShell):**
@@ -35,10 +29,23 @@ chmod +x install.sh
 ```powershell
 git clone https://github.com/ja1902/presto_sqlite.git
 cd presto_sqlite
-.\install.ps1 -PrestoHome C:\presto -SqliteDb C:\data\mydb.sqlite
+powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-Then restart Presto and query:
+The script will ask two questions:
+
+1. **Do you already have Presto installed?**
+   - *Yes* — you provide the path to your existing installation.
+   - *No* — the script downloads and configures Presto 0.296 for you.
+
+2. **Do you already have a SQLite database?**
+   - *Yes* — you provide the path to your `.db` / `.sqlite` file.
+   - *No* — a sample database is created automatically.
+
+After that it builds the plugin, installs it, creates the catalog config,
+and sets up a Python virtual environment.
+
+Start Presto and query:
 
 ```sql
 SHOW CATALOGS;                         -- should list "sqlite"
@@ -126,6 +133,3 @@ presto-sqlite/
 ## License
 
 Apache License 2.0
-
-
-
