@@ -24,7 +24,7 @@ Clone the repo and run the install script. It handles everything:
 **Linux / macOS:**
 
 ```sh
-git clone https://github.com/ja1902/presto-sqlite.git
+git clone https://github.com/ja1902/presto_sqlite.git
 cd presto-sqlite
 chmod +x install.sh
 ./install.sh /opt/presto /absolute/path/to/your/database.db
@@ -33,7 +33,7 @@ chmod +x install.sh
 **Windows (PowerShell):**
 
 ```powershell
-git clone https://github.com/ja1902/presto-sqlite.git
+git clone https://github.com/ja1902/presto_sqlite.git
 cd presto-sqlite
 .\install.ps1 -PrestoHome C:\presto -SqliteDb C:\data\mydb.sqlite
 ```
@@ -126,3 +126,4 @@ presto-sqlite/
 ## License
 
 Apache License 2.0
+
