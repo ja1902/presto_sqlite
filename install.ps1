@@ -138,6 +138,17 @@ else {
 
 # ── Step 1: Build ───────────────────────────────────────────────────────────────
 
+# Ensure Maven wrapper properties exist (GitHub web uploads can't include hidden folders)
+$WrapperDir = Join-Path $ScriptDir ".mvn\wrapper"
+if (-not (Test-Path (Join-Path $WrapperDir "maven-wrapper.properties"))) {
+    New-Item -ItemType Directory -Path $WrapperDir -Force | Out-Null
+    @"
+wrapperVersion=3.3.4
+distributionType=only-script
+distributionUrl=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.9.6/apache-maven-3.9.6-bin.zip
+"@ | Set-Content -Path (Join-Path $WrapperDir "maven-wrapper.properties") -NoNewline
+}
+
 Write-Host ""
 Write-Host "Building presto-sqlite..."
 Push-Location $ScriptDir

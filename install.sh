@@ -140,6 +140,16 @@ fi
 
 # ── Step 1: Build ───────────────────────────────────────────────────────────────
 
+# Ensure Maven wrapper properties exist (GitHub web uploads can't include hidden folders)
+if [ ! -f "$SCRIPT_DIR/.mvn/wrapper/maven-wrapper.properties" ]; then
+    mkdir -p "$SCRIPT_DIR/.mvn/wrapper"
+    cat > "$SCRIPT_DIR/.mvn/wrapper/maven-wrapper.properties" <<'MEOF'
+wrapperVersion=3.3.4
+distributionType=only-script
+distributionUrl=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.9.6/apache-maven-3.9.6-bin.zip
+MEOF
+fi
+
 echo ""
 echo "Building presto-sqlite..."
 cd "$SCRIPT_DIR"
