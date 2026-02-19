@@ -1,0 +1,2 @@
+presto-python-client
+psycopg2-binary

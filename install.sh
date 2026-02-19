@@ -10,10 +10,27 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+# OS detection
+
+case "$(uname -s)" in
+    Darwin) OS_TYPE="macOS" ;;
+    Linux)  OS_TYPE="Linux" ;;
+    *)      OS_TYPE="$(uname -s)" ;;
+esac
+echo "Detected OS: $OS_TYPE"
+
+# Prerequisites
+
+if ! command -v java &>/dev/null; then
+    echo "Error: Java is required but not found on PATH. Presto 0.296 requires Java 8+ (64-bit)."
+    exit 1
+fi
+echo "Found Java: $(java -version 2>&1 | head -1)"
+
 PRESTO_VERSION="0.296"
 PRESTO_TARBALL_URL="https://repo1.maven.org/maven2/com/facebook/presto/presto-server/${PRESTO_VERSION}/presto-server-${PRESTO_VERSION}.tar.gz"
 
-# ── Presto ──────────────────────────────────────────────────────────────────────
+# Presto
 
 echo ""
 echo "Do you already have Presto installed?"
@@ -32,9 +49,14 @@ if [ "$presto_choice" = "1" ]; then
     echo "Using existing Presto at $PRESTO_HOME"
 
 elif [ "$presto_choice" = "2" ]; then
-    read -rp "Where should Presto be installed? (default: $SCRIPT_DIR): " install_dir
+    if [ "$OS_TYPE" = "macOS" ]; then
+        default_install_dir="$HOME/presto-server-$PRESTO_VERSION"
+    else
+        default_install_dir="$SCRIPT_DIR"
+    fi
+    read -rp "Where should Presto be installed? (default: $default_install_dir): " install_dir
     if [ -z "$install_dir" ]; then
-        install_dir="$SCRIPT_DIR"
+        install_dir="$default_install_dir"
     fi
     mkdir -p "$install_dir"
 
@@ -105,7 +127,7 @@ else
     exit 1
 fi
 
-# ── SQLite database ─────────────────────────────────────────────────────────────
+# SQLite database
 
 echo ""
 echo "Do you already have a SQLite database?"
@@ -138,25 +160,23 @@ else
     exit 1
 fi
 
-# ── Step 1: Build ───────────────────────────────────────────────────────────────
+# Step 1: Build
 
-# Ensure Maven wrapper properties exist (GitHub web uploads can't include hidden folders)
-if [ ! -f "$SCRIPT_DIR/.mvn/wrapper/maven-wrapper.properties" ]; then
-    mkdir -p "$SCRIPT_DIR/.mvn/wrapper"
-    cat > "$SCRIPT_DIR/.mvn/wrapper/maven-wrapper.properties" <<'MEOF'
+# Rewrite maven-wrapper.properties to ensure LF line endings.
+mkdir -p "$SCRIPT_DIR/.mvn/wrapper"
+cat > "$SCRIPT_DIR/.mvn/wrapper/maven-wrapper.properties" <<'MEOF'
 wrapperVersion=3.3.4
 distributionType=only-script
 distributionUrl=https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/3.9.6/apache-maven-3.9.6-bin.zip
 MEOF
-fi
 
 echo ""
 echo "Building presto-sqlite..."
 cd "$SCRIPT_DIR"
-./mvnw clean package -q
+bash mvnw clean package -q
 echo "Build complete."
 
-# ── Step 2: Copy plugin JARs ────────────────────────────────────────────────────
+# Step 2: Copy plugin JARs
 
 PLUGIN_DIR="$PRESTO_HOME/plugin/sqlite"
 if [ -d "$PLUGIN_DIR" ]; then
@@ -168,7 +188,7 @@ mkdir -p "$PRESTO_HOME/plugin"
 cp -r "$SCRIPT_DIR/target/presto-sqlite-0.296/sqlite" "$PLUGIN_DIR"
 echo "Plugin installed to $PLUGIN_DIR"
 
-# ── Step 3: Create catalog properties ───────────────────────────────────────────
+# Step 3: Create catalog properties
 
 CATALOG_DIR="$PRESTO_HOME/etc/catalog"
 mkdir -p "$CATALOG_DIR"
@@ -178,20 +198,33 @@ sqlite.db=$SQLITE_DB
 EOF
 echo "Catalog config written to $CATALOG_DIR/sqlite.properties"
 
-# ── Step 4: Python venv ─────────────────────────────────────────────────────────
+# Step 4: Python venv
 
-VENV_DIR="$SCRIPT_DIR/.venv"
+# On WSL with /mnt paths, put the venv on the native Linux filesystem
+# to avoid the I/O penalty of cross-filesystem writes.
+case "$SCRIPT_DIR" in
+    /mnt/*) VENV_DIR="$HOME/.presto_sqlite_venv" ;;
+    *)      VENV_DIR="$SCRIPT_DIR/.venv" ;;
+esac
+echo "Python venv: $VENV_DIR"
+
+# If a Windows venv exists (has Scripts\ but no bin/), delete and recreate it.
+if [ -d "$VENV_DIR" ] && [ ! -f "$VENV_DIR/bin/python" ]; then
+    echo "Removing Windows venv and recreating for Linux..."
+    rm -rf "$VENV_DIR"
+fi
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating Python virtual environment..."
     python3 -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install --upgrade pip -q
-    "$VENV_DIR/bin/pip" install presto-python-client -q
+    "$VENV_DIR/bin/pip" install presto-python-client psycopg2-binary -q
     echo "Python venv created at $VENV_DIR"
 else
     echo "Python venv already exists at $VENV_DIR"
+    "$VENV_DIR/bin/pip" install psycopg2-binary -q
 fi
 
-# ── Step 5: Create demo database (if requested) ────────────────────────────────
+# Step 5: Create demo database (if requested)
 
 if [ "$db_choice" = "2" ]; then
     echo "Creating demo SQLite database..."
@@ -199,8 +232,48 @@ if [ "$db_choice" = "2" ]; then
     echo "Demo database created at $SQLITE_DB"
 fi
 
-# ── Done ────────────────────────────────────────────────────────────────────────
+# Step 6: Start Presto
+
+LAUNCHER="$PRESTO_HOME/bin/launcher"
+if [ -f "$LAUNCHER" ]; then
+    echo ""
+    echo "Starting Presto server..."
+    "$LAUNCHER" start
+
+    # Wait for Presto to be ready
+    echo "Waiting for Presto to be ready (this may take 15-30 seconds)..."
+    ready=false
+    for i in $(seq 1 60); do
+        sleep 2
+        if curl -sf http://localhost:8080/v1/info >/dev/null 2>&1; then
+            ready=true
+            break
+        fi
+    done
+
+    if [ "$ready" = true ]; then
+        echo "Presto is running at http://localhost:8080"
+    else
+        echo "WARNING: Presto did not respond within 2 minutes."
+        echo "Check the logs at: $PRESTO_HOME/data/var/log"
+    fi
+else
+    echo ""
+    echo "WARNING: Could not find Presto launcher at $LAUNCHER"
+    echo "You will need to start Presto manually before querying."
+fi
+
+# Done
 
 echo ""
-echo "Done. Restart Presto, then run the demo:"
-echo "  $VENV_DIR/bin/python demo/query_presto.py"
+echo "Done."
+echo ""
+echo "Activate the virtual environment:"
+echo "  source $VENV_DIR/bin/activate"
+echo ""
+echo "Run the demo:"
+echo "  python demo/query_presto.py"
+echo ""
+echo "Start/stop Presto:"
+echo "  $LAUNCHER start"
+echo "  $LAUNCHER stop"

@@ -1,6 +1,9 @@
-"""Queries the SQLite demo database through a running Presto server."""
+"""Queries SQLite and PostgreSQL through Presto - demonstrates cross-catalog joins."""
+
+import sys
 
 import prestodb
+from requests.exceptions import ConnectionError
 
 
 def get_connection():
@@ -8,16 +11,12 @@ def get_connection():
         host="localhost",
         port=8080,
         user="test",
-        catalog="sqlite",
-        schema="default",
     )
 
 
 def run_query(cursor, sql, title=None):
     if title:
-        print(f"\n{'='*60}")
-        print(f"  {title}")
-        print(f"{'='*60}")
+        print(f"\n--- {title} ---")
     print(f"SQL: {sql.strip()}\n")
 
     cursor.execute(sql)
@@ -50,8 +49,17 @@ def main():
     conn = get_connection()
     cur = conn.cursor()
 
-    run_query(cur, "SHOW CATALOGS", "Catalogs")
-    run_query(cur, 'SHOW TABLES FROM sqlite."default"', "Tables")
+    try:
+        run_query(cur, "SHOW CATALOGS", "Catalogs")
+    except ConnectionError:
+        print("ERROR: Could not connect to Presto at localhost:8080.")
+        print("Make sure the Presto server is running first.")
+        print("")
+        print("  Windows:     docker start presto-postgres presto")
+        print("  Linux/macOS: <presto-home>/bin/launcher start")
+        sys.exit(1)
+
+    run_query(cur, 'SHOW TABLES FROM sqlite."default"', "Tables in sqlite")
 
     run_query(cur, 'SELECT * FROM sqlite."default".departments', "Departments")
     run_query(cur, 'SELECT * FROM sqlite."default".employees ORDER BY salary DESC', "Employees")
@@ -108,6 +116,66 @@ def main():
     )
 
     run_query(cur, 'SELECT * FROM sqlite."default".employee_summary', "Employee summary view")
+
+    # -- PostgreSQL catalog --
+
+    run_query(cur, 'SHOW TABLES FROM postgres.public', "Tables in postgresql")
+
+    run_query(cur, 'SELECT * FROM postgres.public.customers ORDER BY tier, name', "Customers")
+
+    run_query(
+        cur,
+        """
+        SELECT
+            c.name    AS customer,
+            c.tier,
+            c.country,
+            COUNT(*)  AS orders,
+            SUM(co.total_amount) AS total_spent
+        FROM postgres.public.customer_orders co
+        JOIN postgres.public.customers c ON co.customer_id = c.id
+        GROUP BY c.name, c.tier, c.country
+        ORDER BY total_spent DESC
+        """,
+        "Customer spend summary",
+    )
+
+    # -- Cross-catalog join: PostgreSQL customer_orders + SQLite products --
+
+    run_query(
+        cur,
+        """
+        SELECT
+            p.name        AS product,
+            p.category,
+            p.price       AS unit_price,
+            SUM(co.quantity)     AS customer_units,
+            SUM(co.total_amount) AS customer_revenue
+        FROM postgres.public.customer_orders co
+        JOIN sqlite."default".products p ON co.product_id = p.id
+        GROUP BY p.name, p.category, p.price
+        ORDER BY customer_revenue DESC
+        """,
+        "Product demand from external customers (cross-catalog join)",
+    )
+
+    run_query(
+        cur,
+        """
+        SELECT
+            p.name        AS product,
+            p.category,
+            SUM(o.quantity)  AS internal_units,
+            SUM(co.quantity) AS customer_units,
+            SUM(o.quantity) + SUM(co.quantity) AS total_units
+        FROM sqlite."default".products p
+        LEFT JOIN sqlite."default".orders o   ON o.product_id  = p.id
+        LEFT JOIN postgres.public.customer_orders co ON co.product_id = p.id
+        GROUP BY p.name, p.category
+        ORDER BY total_units DESC
+        """,
+        "Internal vs customer demand per product (SQLite + PostgreSQL)",
+    )
 
     cur.close()
     conn.close()

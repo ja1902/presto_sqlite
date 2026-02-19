@@ -6,107 +6,72 @@
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-$PRESTO_VERSION = "0.296"
-$PRESTO_TARBALL_URL = "https://repo1.maven.org/maven2/com/facebook/presto/presto-server/$PRESTO_VERSION/presto-server-$PRESTO_VERSION.tar.gz"
+# Prerequisites
 
-# ── Presto ──────────────────────────────────────────────────────────────────────
-
-Write-Host ""
-Write-Host "Do you already have Presto installed?"
-Write-Host "  1) Yes"
-Write-Host "  2) No"
-$prestoChoice = Read-Host "Enter 1 or 2"
-
-if ($prestoChoice -eq "1") {
-    $PrestoHome = Read-Host "Enter the path to your Presto installation"
-    $PrestoHome = $PrestoHome.Trim('"').Trim("'")
-    if (-not (Test-Path $PrestoHome)) {
-        Write-Error "Path '$PrestoHome' does not exist."
-        exit 1
+# Find Java -- check PATH first, then fall back to common install locations.
+$JavaExe = $null
+if (Get-Command java -ErrorAction SilentlyContinue) {
+    $JavaExe = "java"
+} else {
+    $SearchRoots = @(
+        "C:\Program Files\Java",
+        "C:\Program Files\Eclipse Adoptium",
+        "C:\Program Files\Microsoft",
+        "C:\Program Files\Amazon Corretto",
+        "C:\Program Files\BellSoft",
+        "C:\Program Files\Zulu",
+        "$env:LOCALAPPDATA\Programs\Eclipse Adoptium"
+    )
+    foreach ($root in $SearchRoots) {
+        if (Test-Path $root) {
+            $found = Get-ChildItem $root -Filter "java.exe" -Recurse -ErrorAction SilentlyContinue |
+                     Where-Object { $_.FullName -notlike "*jre*" } |
+                     Sort-Object FullName -Descending |
+                     Select-Object -First 1
+            if (-not $found) {
+                # also accept jre java.exe
+                $found = Get-ChildItem $root -Filter "java.exe" -Recurse -ErrorAction SilentlyContinue |
+                         Sort-Object FullName -Descending |
+                         Select-Object -First 1
+            }
+            if ($found) {
+                $JavaExe = $found.FullName
+                $JavaBin = Split-Path $found.FullName -Parent
+                $env:PATH = "$JavaBin;$env:PATH"
+                $env:JAVA_HOME = Split-Path $JavaBin -Parent
+                Write-Host "Java found at $JavaExe (added to PATH for this session)"
+                break
+            }
+        }
     }
-    Write-Host "Using existing Presto at $PrestoHome"
 }
-elseif ($prestoChoice -eq "2") {
-    $InstallDir = Read-Host "Where should Presto be installed? (default: $ScriptDir)"
-    if ([string]::IsNullOrWhiteSpace($InstallDir)) {
-        $InstallDir = $ScriptDir
-    }
-    $InstallDir = $InstallDir.Trim('"').Trim("'")
-    if (-not (Test-Path $InstallDir)) {
-        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    }
 
-    $PrestoHome = Join-Path $InstallDir "presto-server-$PRESTO_VERSION"
-
-    if (Test-Path $PrestoHome) {
-        Write-Host "Presto already exists at $PrestoHome, skipping download."
-    }
-    else {
-        $TarFile = Join-Path $InstallDir "presto-server-$PRESTO_VERSION.tar.gz"
-        Write-Host "Downloading Presto $PRESTO_VERSION (~650 MB), this may take a few minutes..."
-        Invoke-WebRequest -Uri $PRESTO_TARBALL_URL -OutFile $TarFile -UseBasicParsing
-        Write-Host "Download complete. Extracting..."
-        tar -xf $TarFile -C $InstallDir
-        Remove-Item $TarFile
-        Write-Host "Presto extracted to $PrestoHome"
-    }
-
-    # Create default config files if they don't exist
-    $EtcDir = Join-Path $PrestoHome "etc"
-    if (-not (Test-Path $EtcDir)) {
-        New-Item -ItemType Directory -Path $EtcDir -Force | Out-Null
-    }
-
-    $NodeProps = Join-Path $EtcDir "node.properties"
-    if (-not (Test-Path $NodeProps)) {
-        $DataDir = Join-Path $PrestoHome "data"
-        @"
-node.environment=production
-node.id=$(New-Guid)
-node.data-dir=$DataDir
-"@ | Set-Content -Path $NodeProps -NoNewline
-    }
-
-    $JvmConfig = Join-Path $EtcDir "jvm.config"
-    if (-not (Test-Path $JvmConfig)) {
-        @"
--server
--Xmx4G
--XX:+UseG1GC
--XX:G1HeapRegionSize=32M
--XX:+UseGCOverheadLimit
--XX:+ExplicitGCInvokesConcurrent
--XX:+HeapDumpOnOutOfMemoryError
--XX:+ExitOnOutOfMemoryError
-"@ | Set-Content -Path $JvmConfig -NoNewline
-    }
-
-    $ConfigProps = Join-Path $EtcDir "config.properties"
-    if (-not (Test-Path $ConfigProps)) {
-        @"
-coordinator=true
-node-scheduler.include-coordinator=true
-http-server.http.port=8080
-discovery-server.enabled=true
-discovery.uri=http://localhost:8080
-"@ | Set-Content -Path $ConfigProps -NoNewline
-    }
-
-    $LogProps = Join-Path $EtcDir "log.properties"
-    if (-not (Test-Path $LogProps)) {
-        @"
-com.facebook.presto=INFO
-"@ | Set-Content -Path $LogProps -NoNewline
-    }
-
-    Write-Host "Presto $PRESTO_VERSION is ready at $PrestoHome"
-}
-else {
-    Write-Error "Invalid choice. Please enter 1 or 2."
+if (-not $JavaExe) {
+    Write-Error "Java not found. Please install Java 8+ (64-bit) and re-run this script.`nDownload: https://adoptium.net"
     exit 1
 }
 
-# ── SQLite database ─────────────────────────────────────────────────────────────
+# java -version always writes to stderr; use a local scope to avoid triggering
+# $ErrorActionPreference = "Stop" on the stderr output.
+$javaVersion = & { $ErrorActionPreference = 'Continue'; & $JavaExe -version 2>&1 } | Select-Object -First 1
+Write-Host "Found Java: $javaVersion"
+
+$PRESTO_VERSION = "0.296"
+
+# Docker check
+
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Error "Docker is required but not found on PATH.`nInstall Docker Desktop from https://www.docker.com/products/docker-desktop and re-run."
+    exit 1
+}
+$dockerInfo = & { $ErrorActionPreference = 'Continue'; & docker info 2>&1 }
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Docker is installed but not running. Start Docker Desktop and re-run."
+    exit 1
+}
+Write-Host "Docker is available."
+
+# SQLite database
 
 Write-Host ""
 Write-Host "Do you already have a SQLite database?"
@@ -136,9 +101,8 @@ else {
     exit 1
 }
 
-# ── Step 1: Build ───────────────────────────────────────────────────────────────
+# Step 1: Build
 
-# Ensure Maven wrapper properties exist (GitHub web uploads can't include hidden folders)
 $WrapperDir = Join-Path $ScriptDir ".mvn\wrapper"
 if (-not (Test-Path (Join-Path $WrapperDir "maven-wrapper.properties"))) {
     New-Item -ItemType Directory -Path $WrapperDir -Force | Out-Null
@@ -160,25 +124,9 @@ try {
 }
 Write-Host "Build complete."
 
-# ── Step 2: Copy plugin JARs ────────────────────────────────────────────────────
+# Step 2: Create catalog config (mounted into the Docker container at runtime)
 
-$PluginParent = Join-Path $PrestoHome "plugin"
-if (-not (Test-Path $PluginParent)) {
-    New-Item -ItemType Directory -Path $PluginParent -Force | Out-Null
-}
-
-$PluginDir = Join-Path $PluginParent "sqlite"
-if (Test-Path $PluginDir) {
-    Write-Host "Removing existing plugin at $PluginDir"
-    Remove-Item -Recurse -Force $PluginDir
-}
-
-Copy-Item -Recurse "$ScriptDir\target\presto-sqlite-0.296\sqlite" $PluginDir
-Write-Host "Plugin installed to $PluginDir"
-
-# ── Step 3: Create catalog properties ───────────────────────────────────────────
-
-$CatalogDir = Join-Path $PrestoHome "etc\catalog"
+$CatalogDir = Join-Path $ScriptDir "etc\catalog"
 if (-not (Test-Path $CatalogDir)) {
     New-Item -ItemType Directory -Path $CatalogDir -Force | Out-Null
 }
@@ -186,25 +134,43 @@ if (-not (Test-Path $CatalogDir)) {
 $PropsPath = Join-Path $CatalogDir "sqlite.properties"
 @"
 connector.name=sqlite
-sqlite.db=$SqliteDb
+sqlite.db=/data/sqlite.db
 "@ | Set-Content -Path $PropsPath -NoNewline
 
 Write-Host "Catalog config written to $PropsPath"
 
-# ── Step 4: Python venv ─────────────────────────────────────────────────────────
+$PostgresPropsPath = Join-Path $CatalogDir "postgres.properties"
+@"
+connector.name=postgresql
+connection-url=jdbc:postgresql://presto-postgres:5432/demo
+connection-user=presto
+connection-password=presto
+"@ | Set-Content -Path $PostgresPropsPath -NoNewline
+
+Write-Host "Catalog config written to $PostgresPropsPath"
+
+# Step 3: Python venv
 
 $VenvDir = Join-Path $ScriptDir ".venv"
-if (-not (Test-Path $VenvDir)) {
+$VenvPip = Join-Path $VenvDir "Scripts\pip.exe"
+$VenvValid = (Test-Path $VenvDir) -and (Test-Path $VenvPip)
+
+if (-not $VenvValid) {
+    if (Test-Path $VenvDir) {
+        Write-Host "Existing venv is incomplete, recreating..."
+        Remove-Item -Recurse -Force $VenvDir
+    }
     Write-Host "Creating Python virtual environment..."
     python -m venv $VenvDir
-    & "$VenvDir\Scripts\pip.exe" install --upgrade pip -q
-    & "$VenvDir\Scripts\pip.exe" install presto-python-client -q
+    & $VenvPip install --upgrade pip -q
+    & $VenvPip install presto-python-client psycopg2-binary -q
     Write-Host "Python venv created at $VenvDir"
 } else {
     Write-Host "Python venv already exists at $VenvDir"
+    & $VenvPip install psycopg2-binary -q
 }
 
-# ── Step 5: Create demo database (if requested) ────────────────────────────────
+# Step 4: Create demo database (if requested)
 
 if ($dbChoice -eq "2") {
     Write-Host "Creating demo SQLite database..."
@@ -212,9 +178,102 @@ if ($dbChoice -eq "2") {
     Write-Host "Demo database created at $SqliteDb"
 }
 
-# ── Done ────────────────────────────────────────────────────────────────────────
+# Step 5: Start PostgreSQL via Docker
+
+# Ensure the shared Docker network exists (silently skip if it already does).
+& { $ErrorActionPreference = 'Continue'; & docker network create presto-net 2>&1 | Out-Null }
+
+# Remove any existing postgres container so we get a clean start.
+& { $ErrorActionPreference = 'Continue'; & docker rm -f presto-postgres 2>&1 | Out-Null }
 
 Write-Host ""
-Write-Host "Done. Restart Presto, then run the demo:"
-Write-Host "  $VenvDir\Scripts\python.exe demo\query_presto.py"
+Write-Host "Starting PostgreSQL in Docker..."
+& docker run -d --name presto-postgres --network presto-net `
+    -e POSTGRES_DB=demo -e POSTGRES_USER=presto -e POSTGRES_PASSWORD=presto `
+    -p 5432:5432 `
+    postgres:16
 
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to start PostgreSQL container. Make sure Docker Desktop is running."
+    exit 1
+}
+
+Write-Host "Waiting for PostgreSQL to be ready..."
+$pgReady = $false
+for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 2
+    $pgCheck = & { $ErrorActionPreference = 'Continue'; & docker exec presto-postgres pg_isready -U presto 2>&1 }
+    if ($LASTEXITCODE -eq 0) { $pgReady = $true; break }
+}
+
+if (-not $pgReady) {
+    Write-Error "PostgreSQL did not become ready in time.`nCheck logs with: docker logs presto-postgres"
+    exit 1
+}
+
+Write-Host "PostgreSQL is ready."
+Write-Host "Seeding PostgreSQL demo database..."
+& "$VenvDir\Scripts\python.exe" "$ScriptDir\demo\create_postgres_db.py"
+
+# Step 6: Start Presto via Docker
+
+$PluginSrc = "$ScriptDir\target\presto-sqlite-$PRESTO_VERSION\sqlite"
+
+# Remove any existing container so we get a clean start (ignore error if it doesn't exist).
+& { $ErrorActionPreference = 'Continue'; & docker rm -f presto 2>&1 | Out-Null }
+
+Write-Host ""
+Write-Host "Starting Presto $PRESTO_VERSION via Docker..."
+& docker run -d --name presto -p 8080:8080 --network presto-net `
+    -v "${PluginSrc}:/opt/presto-server/plugin/sqlite" `
+    -v "${PropsPath}:/opt/presto-server/etc/catalog/sqlite.properties" `
+    -v "${PostgresPropsPath}:/opt/presto-server/etc/catalog/postgres.properties" `
+    -v "${SqliteDb}:/data/sqlite.db:ro" `
+    "prestodb/presto:$PRESTO_VERSION"
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to start Docker container. Make sure Docker Desktop is running."
+    exit 1
+}
+
+Write-Host "Waiting for Presto to be ready (first start pulls the image and may take a few minutes)..."
+$ready = $false
+$startTime = Get-Date
+for ($i = 0; $i -lt 90; $i++) {
+    Start-Sleep -Seconds 2
+    $elapsed = [int]((Get-Date) - $startTime).TotalSeconds
+    try {
+        $response = Invoke-WebRequest -Uri "http://localhost:8080/v1/info" -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        if ($response.StatusCode -eq 200) {
+            $ready = $true
+            Write-Host ""
+            break
+        }
+    } catch { }
+    Write-Host -NoNewline "`r  Still waiting... ${elapsed}s elapsed"
+}
+
+if ($ready) {
+    Write-Host "Presto is running at http://localhost:8080"
+} else {
+    Write-Host ""
+    Write-Host "WARNING: Presto did not respond after 3 minutes."
+    Write-Host "Check container logs with:  docker logs presto"
+}
+
+# Done
+
+Write-Host ""
+Write-Host "Done. Presto is running in Docker."
+Write-Host ""
+Write-Host "Activate the virtual environment in your shell:"
+Write-Host "  .\.venv\Scripts\Activate.ps1"
+Write-Host ""
+Write-Host "Then run the demo:"
+Write-Host "  python demo\query_presto.py"
+Write-Host ""
+Write-Host "  (or without activating: $VenvDir\Scripts\python.exe demo\query_presto.py)"
+Write-Host ""
+Write-Host "To start/stop Presto and PostgreSQL in the future:"
+Write-Host "  docker start presto-postgres presto"
+Write-Host "  docker stop presto presto-postgres"

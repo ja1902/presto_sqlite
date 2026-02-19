@@ -1,7 +1,9 @@
 -- presto-sqlite demo queries
--- Run via Presto CLI:  presto --catalog sqlite --schema default --file query_all.sql
+-- Run via Presto CLI:  presto --server localhost:8080 --file query_all.sql
 
-SHOW SCHEMAS FROM sqlite;
+SHOW CATALOGS;
+
+-- SQLite
 
 SHOW TABLES FROM sqlite."default";
 
@@ -43,3 +45,45 @@ GROUP BY p.category
 ORDER BY total_revenue DESC;
 
 SELECT * FROM sqlite."default".employee_summary;
+
+-- PostgreSQL
+
+SHOW TABLES FROM postgres.public;
+
+SELECT * FROM postgres.public.customers ORDER BY tier, name;
+
+SELECT
+    c.name    AS customer,
+    c.tier,
+    c.country,
+    COUNT(*)  AS orders,
+    SUM(co.total_amount) AS total_spent
+FROM postgres.public.customer_orders co
+JOIN postgres.public.customers c ON co.customer_id = c.id
+GROUP BY c.name, c.tier, c.country
+ORDER BY total_spent DESC;
+
+-- Cross-catalog joins
+
+SELECT
+    p.name        AS product,
+    p.category,
+    p.price       AS unit_price,
+    SUM(co.quantity)     AS customer_units,
+    SUM(co.total_amount) AS customer_revenue
+FROM postgres.public.customer_orders co
+JOIN sqlite."default".products p ON co.product_id = p.id
+GROUP BY p.name, p.category, p.price
+ORDER BY customer_revenue DESC;
+
+SELECT
+    p.name        AS product,
+    p.category,
+    SUM(o.quantity)  AS internal_units,
+    SUM(co.quantity) AS customer_units,
+    SUM(o.quantity) + SUM(co.quantity) AS total_units
+FROM sqlite."default".products p
+LEFT JOIN sqlite."default".orders o   ON o.product_id  = p.id
+LEFT JOIN postgres.public.customer_orders co ON co.product_id = p.id
+GROUP BY p.name, p.category
+ORDER BY total_units DESC;
