@@ -185,7 +185,7 @@ if [ ! -d "$VENV_DIR" ]; then
     echo "Creating Python virtual environment..."
     python3 -m venv "$VENV_DIR"
     "$VENV_DIR/bin/pip" install --upgrade pip -q
-    "$VENV_DIR/bin/pip" install prestodb -q
+    "$VENV_DIR/bin/pip" install presto-python-client -q
     echo "Python venv created at $VENV_DIR"
 else
     echo "Python venv already exists at $VENV_DIR"
