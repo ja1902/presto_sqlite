@@ -198,7 +198,7 @@ if (-not (Test-Path $VenvDir)) {
     Write-Host "Creating Python virtual environment..."
     python -m venv $VenvDir
     & "$VenvDir\Scripts\pip.exe" install --upgrade pip -q
-    & "$VenvDir\Scripts\pip.exe" install prestodb -q
+    & "$VenvDir\Scripts\pip.exe" install presto-python-client -q
     Write-Host "Python venv created at $VenvDir"
 } else {
     Write-Host "Python venv already exists at $VenvDir"
@@ -217,3 +217,4 @@ if ($dbChoice -eq "2") {
 Write-Host ""
 Write-Host "Done. Restart Presto, then run the demo:"
 Write-Host "  $VenvDir\Scripts\python.exe demo\query_presto.py"
+
