@@ -1,0 +1,22 @@
+# Presto server distribution (downloaded by install.sh, ~650 MB)
+presto-server-*/
+
+# Catalog config (written by install scripts, contains local paths)
+etc/
+
+# Python virtual environment
+.venv/
+
+# SQLite demo database
+demo/mock_data.db
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Maven build output
+target/
+
+# macOS
+.DS_Store
