@@ -18,5 +18,10 @@ __pycache__/
 # Maven build output
 target/
 
+# PUDL database (downloaded by run_pudl_benchmark scripts, ~21 GB)
+pudl.sqlite/
+data/
+*.sqlite
+
 # macOS
 .DS_Store

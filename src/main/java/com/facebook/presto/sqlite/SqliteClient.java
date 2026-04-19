@@ -14,39 +14,43 @@
 package com.facebook.presto.sqlite;
 
 import com.facebook.presto.spi.PrestoException;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
 
 import static com.facebook.presto.spi.StandardErrorCode.GENERIC_INTERNAL_ERROR;
 import static java.util.Objects.requireNonNull;
 
-/**
- * Manages JDBC connections to a SQLite database file.
- */
 public class SqliteClient
 {
-    private final String jdbcUrl;
+    private final HikariDataSource dataSource;
 
     public SqliteClient(String dbPath)
     {
         requireNonNull(dbPath, "dbPath is null");
-        this.jdbcUrl = "jdbc:sqlite:" + dbPath;
 
-        // Ensure the SQLite JDBC driver is loaded
         try {
             Class.forName("org.sqlite.JDBC");
         }
         catch (ClassNotFoundException e) {
             throw new PrestoException(GENERIC_INTERNAL_ERROR, "SQLite JDBC driver not found", e);
         }
+
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl("jdbc:sqlite:" + dbPath);
+        config.setMaximumPoolSize(10);
+        config.setMinimumIdle(2);
+        config.setConnectionTimeout(5000);
+        config.setPoolName("sqlite-pool");
+        this.dataSource = new HikariDataSource(config);
     }
 
     public Connection getConnection()
     {
         try {
-            return DriverManager.getConnection(jdbcUrl);
+            return dataSource.getConnection();
         }
         catch (SQLException e) {
             throw new PrestoException(GENERIC_INTERNAL_ERROR, "Failed to connect to SQLite database: " + e.getMessage(), e);

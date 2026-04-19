@@ -45,6 +45,7 @@ public class SqliteRecordSetProvider
             builder.add((SqliteColumnHandle) column);
         }
 
-        return new SqliteRecordSet(sqliteClient, sqliteSplit.getTableName(), builder.build());
+        return new SqliteRecordSet(sqliteClient, sqliteSplit.getTableName(), builder.build(),
+                sqliteSplit.getWhereClause(), sqliteSplit.getRowidStart(), sqliteSplit.getRowidEnd());
     }
 }

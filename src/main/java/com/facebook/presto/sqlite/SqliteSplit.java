@@ -31,14 +31,23 @@ public class SqliteSplit
 {
     private final String schemaName;
     private final String tableName;
+    private final String whereClause;
+    private final long rowidStart;
+    private final long rowidEnd;
 
     @JsonCreator
     public SqliteSplit(
             @JsonProperty("schemaName") String schemaName,
-            @JsonProperty("tableName") String tableName)
+            @JsonProperty("tableName") String tableName,
+            @JsonProperty("whereClause") String whereClause,
+            @JsonProperty("rowidStart") long rowidStart,
+            @JsonProperty("rowidEnd") long rowidEnd)
     {
         this.schemaName = requireNonNull(schemaName, "schemaName is null");
         this.tableName = requireNonNull(tableName, "tableName is null");
+        this.whereClause = whereClause == null ? "" : whereClause;
+        this.rowidStart = rowidStart;
+        this.rowidEnd = rowidEnd;
     }
 
     @JsonProperty
@@ -51,6 +60,29 @@ public class SqliteSplit
     public String getTableName()
     {
         return tableName;
+    }
+
+    @JsonProperty
+    public String getWhereClause()
+    {
+        return whereClause;
+    }
+
+    @JsonProperty
+    public long getRowidStart()
+    {
+        return rowidStart;
+    }
+
+    @JsonProperty
+    public long getRowidEnd()
+    {
+        return rowidEnd;
+    }
+
+    public boolean hasRowidRange()
+    {
+        return rowidStart >= 0 && rowidEnd >= 0;
     }
 
     @Override

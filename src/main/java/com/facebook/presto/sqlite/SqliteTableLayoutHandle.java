@@ -23,17 +23,32 @@ public class SqliteTableLayoutHandle
         implements ConnectorTableLayoutHandle
 {
     private final SqliteTableHandle table;
+    private final String whereClause;
 
     @JsonCreator
-    public SqliteTableLayoutHandle(@JsonProperty("table") SqliteTableHandle table)
+    public SqliteTableLayoutHandle(
+            @JsonProperty("table") SqliteTableHandle table,
+            @JsonProperty("whereClause") String whereClause)
     {
         this.table = requireNonNull(table, "table is null");
+        this.whereClause = whereClause == null ? "" : whereClause;
+    }
+
+    public SqliteTableLayoutHandle(SqliteTableHandle table)
+    {
+        this(table, "");
     }
 
     @JsonProperty
     public SqliteTableHandle getTable()
     {
         return table;
+    }
+
+    @JsonProperty
+    public String getWhereClause()
+    {
+        return whereClause;
     }
 
     @Override

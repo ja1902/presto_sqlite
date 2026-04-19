@@ -74,7 +74,7 @@ public class SqliteConnectorFactory
             @Override
             public ConnectorSplitManager getSplitManager()
             {
-                return new SqliteSplitManager();
+                return new SqliteSplitManager(sqliteClient);
             }
 
             @Override

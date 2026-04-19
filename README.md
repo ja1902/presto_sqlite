@@ -49,6 +49,27 @@ The install scripts are a convenience to get everything running locally.
 For production deployments see the
 [Presto documentation](https://prestodb.io/docs/current/).
 
+## Performance
+
+The connector includes several optimizations for handling large datasets:
+
+| Optimization | Description | Impact |
+|---|---|---|
+| **Predicate pushdown** | WHERE clause filters are translated to SQL and executed inside SQLite, reducing data transfer | Up to **6x faster** on filtered joins |
+| **Multi-split parallelism** | Large tables are split into ROWID ranges so Presto reads them in parallel | Up to **3x faster** on aggregations |
+| **COUNT(\*) pushdown** | `SELECT COUNT(*)` runs natively in SQLite instead of streaming every row | ~**1.2x faster** |
+| **Connection pooling** | HikariCP pool reuses JDBC connections across splits and queries | Reduced per-query overhead |
+
+These were benchmarked against the 21 GB [PUDL](https://catalyst.coop/pudl/) energy
+database (343 tables, largest 3.3M rows). See
+[BENCHMARK_REPORT.md](BENCHMARK_REPORT.md) for the full analysis, methodology,
+and before/after timings.
+
+To reproduce the benchmark yourself, see
+[Running the PUDL benchmark](#running-the-pudl-benchmark) below.
+
+---
+
 ## Requirements
 
 | | Linux / macOS | Windows |
@@ -243,9 +264,58 @@ falls back to `VARCHAR` for anything unmapped.
 
 - **Read-only** -- no `INSERT`, `UPDATE`, `DELETE`, or DDL
 - **Single schema** (`default`)
-- **No predicate pushdown** -- all filtering happens in Presto after a full scan
-- **No parallel reads** -- one split per table
 - `DATE` / `TIMESTAMP` columns are returned as `VARCHAR`
+
+---
+
+## Running the PUDL benchmark
+
+The [PUDL](https://catalyst.coop/pudl/) (Public Utility Data Liberation) database
+is a 21 GB SQLite file containing US energy sector data from the EIA -- 343 tables,
+with the largest at 3.3 million rows. It makes an excellent real-world stress test
+for the connector.
+
+A single script downloads the database, builds the connector, starts all services,
+and runs both the SQLite-only benchmark and the cross-connector federation test
+(SQLite + PostgreSQL).
+
+**Prerequisites:** Java 8+, Docker Desktop (running), Python 3, [AWS CLI v2](https://aws.amazon.com/cli/)
+
+**Windows (PowerShell):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File run_pudl_benchmark.ps1
+```
+
+**Linux / macOS:**
+
+```sh
+chmod +x run_pudl_benchmark.sh
+./run_pudl_benchmark.sh
+```
+
+The script is fully automated (no prompts). It skips steps that are already done --
+if the PUDL database is already downloaded, it won't re-download it. The full run
+takes 15-30 minutes depending on download speed and hardware.
+
+**Options** (set as environment variables):
+
+| Variable | Description |
+|---|---|
+| `PUDL_DB` | Path to an existing PUDL `.sqlite` file (skips download) |
+| `SKIP_BUILD` | Set to `1` to skip the Maven build |
+| `SKIP_BENCHMARK` | Set to `1` to skip the SQLite benchmark, run only the cross-connector test |
+| `BENCHMARK_RUNS` | Number of recorded runs per query (default: `3`) |
+
+**What it runs:**
+
+1. `demo/benchmark_pudl.py --large` -- benchmarks COUNT(\*), aggregation, joins,
+   and pagination on tables from 19K to 3.3M rows
+2. `demo/cross_connector_test.py` -- 12 federated queries joining SQLite energy
+   data with PostgreSQL reference tables (state demographics, emission factors,
+   regulatory inspections), including 4-way cross-catalog joins
+
+For detailed results and analysis, see [BENCHMARK_REPORT.md](BENCHMARK_REPORT.md).
 
 ---
 
@@ -256,19 +326,23 @@ presto-sqlite/
   pom.xml
   install.sh                         Setup script (Linux / macOS)
   install.ps1                        Setup script (Windows)
+  run_pudl_benchmark.sh              PUDL benchmark runner (Linux / macOS)
+  run_pudl_benchmark.ps1             PUDL benchmark runner (Windows)
+  BENCHMARK_REPORT.md                Performance analysis and results
   src/
     assembly/plugin.xml              Assembly descriptor for plugin packaging
     main/java/.../sqlite/
       SqlitePlugin.java              SPI entry point
       SqliteConnectorFactory.java    Creates connectors from catalog config
-      SqliteMetadata.java            Schema / table / column metadata + type mapping
-      SqliteSplitManager.java        Single split per table
+      SqliteMetadata.java            Schema / table / column metadata + predicate pushdown
+      SqliteSplitManager.java        Multi-split parallelism via ROWID ranges
       SqliteRecordSetProvider.java   Bridges splits to record sets
-      SqliteRecordSet.java           RecordSet + RecordCursor (reads via JDBC)
+      SqliteRecordSet.java           RecordSet + RecordCursor (JDBC reads + COUNT pushdown)
+      SqliteClient.java              HikariCP connection pool
       SqliteColumnHandle.java        Column handle (name, type, ordinal)
       SqliteTableHandle.java         Table handle (schema, table name)
-      SqliteTableLayoutHandle.java   Layout wrapper
-      SqliteSplit.java               Split definition
+      SqliteTableLayoutHandle.java   Layout wrapper (carries WHERE clause)
+      SqliteSplit.java               Split definition (WHERE + ROWID range)
       SqliteHandleResolver.java      Handle class resolution
       SqliteTransactionHandle.java   Transaction handle (singleton)
     main/resources/META-INF/services/
@@ -276,7 +350,10 @@ presto-sqlite/
   demo/
     create_sqlite_db.py              Creates the sample SQLite database
     create_postgres_db.py            Seeds the sample PostgreSQL database
+    create_postgres_pudl.py          Seeds PostgreSQL with PUDL reference data
     query_presto.py                  Demo queries (SQLite, PostgreSQL, cross-catalog)
+    benchmark_pudl.py                PUDL benchmark suite (COUNT, aggregation, joins)
+    cross_connector_test.py          Cross-connector federation test (SQLite + PostgreSQL)
     query_all.sql                    Same queries for the Presto CLI
 ```
 

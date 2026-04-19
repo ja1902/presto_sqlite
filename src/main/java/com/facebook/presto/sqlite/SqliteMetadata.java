@@ -13,7 +13,13 @@
  */
 package com.facebook.presto.sqlite;
 
+import com.facebook.presto.common.predicate.Domain;
+import com.facebook.presto.common.predicate.Range;
+import com.facebook.presto.common.predicate.SortedRangeSet;
+import com.facebook.presto.common.predicate.TupleDomain;
+import com.facebook.presto.common.predicate.ValueSet;
 import com.facebook.presto.common.type.Type;
+import com.facebook.presto.common.type.VarcharType;
 import com.facebook.presto.spi.ColumnHandle;
 import com.facebook.presto.spi.ColumnMetadata;
 import com.facebook.presto.spi.ConnectorSession;
@@ -29,6 +35,7 @@ import com.facebook.presto.spi.SchemaTablePrefix;
 import com.facebook.presto.spi.connector.ConnectorMetadata;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import io.airlift.slice.Slice;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -39,6 +46,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static com.facebook.presto.common.type.BigintType.BIGINT;
 import static com.facebook.presto.common.type.BooleanType.BOOLEAN;
@@ -98,7 +106,10 @@ public class SqliteMetadata
             Optional<Set<ColumnHandle>> desiredColumns)
     {
         SqliteTableHandle tableHandle = (SqliteTableHandle) table;
-        ConnectorTableLayout layout = new ConnectorTableLayout(new SqliteTableLayoutHandle(tableHandle));
+        TupleDomain<ColumnHandle> tupleDomain = constraint.getSummary();
+        String whereClause = buildWhereClause(tupleDomain);
+        ConnectorTableLayout layout = new ConnectorTableLayout(
+                new SqliteTableLayoutHandle(tableHandle, whereClause));
         return new ConnectorTableLayoutResult(layout, constraint.getSummary());
     }
 
@@ -241,5 +252,165 @@ public class SqliteMetadata
             default:
                 return VARCHAR;
         }
+    }
+
+    // --- Predicate pushdown: TupleDomain to SQL WHERE clause ---
+
+    static String buildWhereClause(TupleDomain<ColumnHandle> tupleDomain)
+    {
+        if (tupleDomain.isAll()) {
+            return "";
+        }
+        if (tupleDomain.isNone()) {
+            return "1 = 0";
+        }
+
+        Optional<Map<ColumnHandle, Domain>> domains = tupleDomain.getDomains();
+        if (!domains.isPresent()) {
+            return "";
+        }
+
+        List<String> conjuncts = new ArrayList<>();
+        for (Map.Entry<ColumnHandle, Domain> entry : domains.get().entrySet()) {
+            SqliteColumnHandle column = (SqliteColumnHandle) entry.getKey();
+            Domain domain = entry.getValue();
+            String fragment = domainToSql(column, domain);
+            if (fragment != null) {
+                conjuncts.add(fragment);
+            }
+        }
+
+        if (conjuncts.isEmpty()) {
+            return "";
+        }
+        return String.join(" AND ", conjuncts);
+    }
+
+    private static String domainToSql(SqliteColumnHandle column, Domain domain)
+    {
+        if (domain.isAll()) {
+            return null;
+        }
+        if (domain.isNone()) {
+            return "1 = 0";
+        }
+
+        String quotedName = "\"" + column.getColumnName() + "\"";
+
+        if (domain.isSingleValue()) {
+            return quotedName + " = " + valueToLiteral(domain.getSingleValue());
+        }
+
+        ValueSet values = domain.getValues();
+        boolean nullAllowed = domain.isNullAllowed();
+
+        List<String> disjuncts = new ArrayList<>();
+
+        if (values instanceof SortedRangeSet) {
+            SortedRangeSet rangeSet = (SortedRangeSet) values;
+            List<Range> ranges = rangeSet.getOrderedRanges();
+
+            List<Object> equalities = new ArrayList<>();
+            List<String> rangeSql = new ArrayList<>();
+
+            for (Range range : ranges) {
+                if (range.isSingleValue()) {
+                    equalities.add(range.getSingleValue());
+                }
+                else {
+                    String r = rangeToSql(quotedName, range);
+                    if (r != null) {
+                        rangeSql.add(r);
+                    }
+                }
+            }
+
+            if (!equalities.isEmpty()) {
+                if (equalities.size() == 1) {
+                    disjuncts.add(quotedName + " = " + valueToLiteral(equalities.get(0)));
+                }
+                else {
+                    String inList = equalities.stream()
+                            .map(SqliteMetadata::valueToLiteral)
+                            .collect(Collectors.joining(", "));
+                    disjuncts.add(quotedName + " IN (" + inList + ")");
+                }
+            }
+            disjuncts.addAll(rangeSql);
+        }
+        else {
+            // AllOrNoneValueSet or EquatableValueSet: skip pushdown for this column
+            return null;
+        }
+
+        if (nullAllowed) {
+            disjuncts.add(quotedName + " IS NULL");
+        }
+
+        if (disjuncts.isEmpty()) {
+            return null;
+        }
+        if (disjuncts.size() == 1) {
+            return disjuncts.get(0);
+        }
+        return "(" + String.join(" OR ", disjuncts) + ")";
+    }
+
+    private static String rangeToSql(String quotedName, Range range)
+    {
+        if (range.isAll()) {
+            return null;
+        }
+
+        List<String> parts = new ArrayList<>();
+
+        if (!range.getLow().isLowerUnbounded()) {
+            switch (range.getLow().getBound()) {
+                case ABOVE:
+                    parts.add(quotedName + " > " + valueToLiteral(range.getLow().getValue()));
+                    break;
+                case EXACTLY:
+                    parts.add(quotedName + " >= " + valueToLiteral(range.getLow().getValue()));
+                    break;
+                case BELOW:
+                    break;
+            }
+        }
+
+        if (!range.getHigh().isUpperUnbounded()) {
+            switch (range.getHigh().getBound()) {
+                case BELOW:
+                    parts.add(quotedName + " < " + valueToLiteral(range.getHigh().getValue()));
+                    break;
+                case EXACTLY:
+                    parts.add(quotedName + " <= " + valueToLiteral(range.getHigh().getValue()));
+                    break;
+                case ABOVE:
+                    break;
+            }
+        }
+
+        if (parts.isEmpty()) {
+            return null;
+        }
+        return String.join(" AND ", parts);
+    }
+
+    static String valueToLiteral(Object value)
+    {
+        if (value == null) {
+            return "NULL";
+        }
+        if (value instanceof Slice) {
+            String s = ((Slice) value).toStringUtf8();
+            return "'" + s.replace("'", "''") + "'";
+        }
+        if (value instanceof String) {
+            return "'" + ((String) value).replace("'", "''") + "'";
+        }
+        if (value instanceof Boolean) {
+            return (Boolean) value ? "1" : "0";
+        }
+        return String.valueOf(value);
     }
 }

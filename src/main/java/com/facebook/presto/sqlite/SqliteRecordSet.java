@@ -25,6 +25,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -38,8 +39,12 @@ public class SqliteRecordSet
     private final String tableName;
     private final List<SqliteColumnHandle> columns;
     private final List<Type> columnTypes;
+    private final String whereClause;
+    private final long rowidStart;
+    private final long rowidEnd;
 
-    public SqliteRecordSet(SqliteClient sqliteClient, String tableName, List<SqliteColumnHandle> columns)
+    public SqliteRecordSet(SqliteClient sqliteClient, String tableName, List<SqliteColumnHandle> columns,
+            String whereClause, long rowidStart, long rowidEnd)
     {
         this.sqliteClient = requireNonNull(sqliteClient, "sqliteClient is null");
         this.tableName = requireNonNull(tableName, "tableName is null");
@@ -47,6 +52,9 @@ public class SqliteRecordSet
         this.columnTypes = columns.stream()
                 .map(SqliteColumnHandle::getType)
                 .collect(Collectors.toList());
+        this.whereClause = whereClause == null ? "" : whereClause;
+        this.rowidStart = rowidStart;
+        this.rowidEnd = rowidEnd;
     }
 
     @Override
@@ -58,7 +66,22 @@ public class SqliteRecordSet
     @Override
     public RecordCursor cursor()
     {
-        return new SqliteRecordCursor(sqliteClient, tableName, columns);
+        return new SqliteRecordCursor(sqliteClient, tableName, columns, whereClause, rowidStart, rowidEnd);
+    }
+
+    private static String buildWhereFragment(String whereClause, long rowidStart, long rowidEnd)
+    {
+        List<String> conditions = new ArrayList<>();
+        if (whereClause != null && !whereClause.isEmpty()) {
+            conditions.add(whereClause);
+        }
+        if (rowidStart >= 0 && rowidEnd >= 0) {
+            conditions.add("ROWID BETWEEN " + rowidStart + " AND " + rowidEnd);
+        }
+        if (conditions.isEmpty()) {
+            return "";
+        }
+        return " WHERE " + String.join(" AND ", conditions);
     }
 
     public static class SqliteRecordCursor
@@ -70,20 +93,44 @@ public class SqliteRecordSet
         private final ResultSet resultSet;
         private boolean closed;
         private long completedBytes;
+        private final boolean countMode;
+        private long countRemaining;
 
-        public SqliteRecordCursor(SqliteClient sqliteClient, String tableName, List<SqliteColumnHandle> columns)
+        public SqliteRecordCursor(SqliteClient sqliteClient, String tableName, List<SqliteColumnHandle> columns,
+                String whereClause, long rowidStart, long rowidEnd)
         {
             this.columns = requireNonNull(columns, "columns is null");
 
             try {
                 this.connection = sqliteClient.getConnection();
                 this.statement = connection.createStatement();
+                this.statement.setFetchSize(10000);
 
-                String columnList = columns.stream()
-                        .map(col -> "\"" + col.getColumnName() + "\"")
-                        .collect(Collectors.joining(", "));
-                String sql = "SELECT " + columnList + " FROM \"" + tableName + "\"";
-                this.resultSet = statement.executeQuery(sql);
+                String whereFragment = buildWhereFragment(whereClause, rowidStart, rowidEnd);
+
+                if (columns.isEmpty()) {
+                    // COUNT(*) optimization: get the count from SQLite and use a counter
+                    String countSql = "SELECT COUNT(*) FROM \"" + tableName + "\"" + whereFragment;
+                    ResultSet countRs = statement.executeQuery(countSql);
+                    if (countRs.next()) {
+                        this.countRemaining = countRs.getLong(1);
+                    }
+                    else {
+                        this.countRemaining = 0;
+                    }
+                    countRs.close();
+                    this.countMode = true;
+                    this.resultSet = null;
+                }
+                else {
+                    String columnList = columns.stream()
+                            .map(col -> "\"" + col.getColumnName() + "\"")
+                            .collect(Collectors.joining(", "));
+                    String sql = "SELECT " + columnList + " FROM \"" + tableName + "\"" + whereFragment;
+                    this.resultSet = statement.executeQuery(sql);
+                    this.countMode = false;
+                    this.countRemaining = 0;
+                }
             }
             catch (SQLException e) {
                 throw new PrestoException(GENERIC_INTERNAL_ERROR, "Failed to execute SQLite query: " + e.getMessage(), e);
@@ -114,6 +161,16 @@ public class SqliteRecordSet
             if (closed) {
                 return false;
             }
+
+            if (countMode) {
+                if (countRemaining > 0) {
+                    countRemaining--;
+                    return true;
+                }
+                close();
+                return false;
+            }
+
             try {
                 boolean hasNext = resultSet.next();
                 if (!hasNext) {
@@ -203,10 +260,12 @@ public class SqliteRecordSet
         {
             if (!closed) {
                 closed = true;
-                try {
-                    resultSet.close();
-                }
-                catch (SQLException ignored) {
+                if (resultSet != null) {
+                    try {
+                        resultSet.close();
+                    }
+                    catch (SQLException ignored) {
+                    }
                 }
                 try {
                     statement.close();
